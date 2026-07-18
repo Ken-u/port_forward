@@ -17,6 +17,9 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
+// Set by CI: -ldflags "-X main.version=v1.0.0"
+var version = "dev"
+
 //go:embed web/static/*
 var webFS embed.FS
 
@@ -92,7 +95,7 @@ func main() {
 	mux.HandleFunc("/", app.handleWeb)
 
 	addr := fmt.Sprintf(":%d", app.port)
-	log.Printf("端口转发管理程序启动: http://0.0.0.0%s", addr)
+	log.Printf("port_fwd %s 启动: http://0.0.0.0%s", version, addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}

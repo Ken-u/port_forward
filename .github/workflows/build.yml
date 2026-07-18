@@ -1,4 +1,4 @@
-name: Build
+name: Build & Release
 
 on:
   push:
@@ -7,30 +7,83 @@ on:
   pull_request:
     branches: [main, master]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "发布版本号（不含 v，例如 1.0.0）。填写后会自动打 tag；tag 推送后会自动编译并创建 Release。"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
+  tag:
+    name: Create tag
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create and push tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          ver="${VERSION#v}"
+          if [[ ! "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+            echo "Invalid version: $VERSION (expected like 1.0.0)"
+            exit 1
+          fi
+          tag="v${ver}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists"
+            exit 1
+          fi
+          git tag -a "$tag" -m "Release $tag"
+          git push origin "$tag"
+          echo "Created $tag — Build & Release will run on the tag push."
+
   build:
     name: Build ${{ matrix.name }}
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: macos-arm64
+          - name: darwin-arm64
             goos: darwin
             goarch: arm64
-            artifact: port_fwd-darwin-arm64
-          - name: debian-arm64
+            ext: ""
+          - name: darwin-amd64
+            goos: darwin
+            goarch: amd64
+            ext: ""
+          - name: linux-arm64
             goos: linux
             goarch: arm64
-            artifact: port_fwd-linux-arm64
+            ext: ""
           - name: linux-amd64
             goos: linux
             goarch: amd64
-            artifact: port_fwd-linux-amd64
+            ext: ""
+          - name: linux-386
+            goos: linux
+            goarch: 386
+            ext: ""
+          - name: windows-amd64
+            goos: windows
+            goarch: amd64
+            ext: ".exe"
+          - name: windows-arm64
+            goos: windows
+            goarch: arm64
+            ext: ".exe"
 
     steps:
       - name: Checkout
@@ -47,39 +100,64 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          go build -trimpath -ldflags="-s -w" -o "${{ matrix.artifact }}" .
-          file "${{ matrix.artifact }}" || true
-          ls -lh "${{ matrix.artifact }}"
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME}"
+          if [[ "${{ github.ref_type }}" != "tag" ]]; then
+            ver="dev"
+          fi
+          bin="port_fwd-${{ matrix.name }}${{ matrix.ext }}"
+          go build -trimpath -ldflags="-s -w -X main.version=${ver}" -o "$bin" .
+          ls -lh "$bin"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: port_fwd-${{ matrix.name }}
+          path: port_fwd-${{ matrix.name }}${{ matrix.ext }}
           if-no-files-found: error
 
   release:
     name: Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          path: dist
-          merge-multiple: true
+          path: artifacts
 
-      - name: List binaries
-        run: ls -lh dist/
+      - name: Package release assets
+        working-directory: artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p ../dist
+          for dir in */; do
+            name="${dir%/}"
+            bin=$(find "$dir" -type f | head -n 1)
+            base=$(basename "$bin")
+            case "$base" in
+              *.exe)
+                (cd "$dir" && zip -9 "../../dist/${name}.zip" "$base")
+                ;;
+              *)
+                tar -C "$dir" -czf "../dist/${name}.tar.gz" "$base"
+                ;;
+            esac
+          done
+          cd ../dist
+          sha256sum *.tar.gz *.zip > checksums.txt
+          ls -lh
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/port_fwd-darwin-arm64
-            dist/port_fwd-linux-arm64
-            dist/port_fwd-linux-amd64
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
