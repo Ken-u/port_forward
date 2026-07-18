@@ -27,6 +27,10 @@ th { color: #71767b; font-weight: 500; }
 .form-row { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
 .form-row input, .form-row select { flex: 1; min-width: 100px; padding: 8px 12px; border-radius: 8px; border: 1px solid #2f3336; background: #0f1419; color: #e7e9ea; font-size: 0.85rem; }
 .form-row input:focus, .form-row select:focus { outline: none; border-color: #1d9bf0; }
+.token-field { display: flex; flex: 1; position: relative; }
+.token-field input { width: 100%; padding-right: 44px; }
+.token-toggle { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 36px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #aeb4b9; cursor: pointer; font-size: 1rem; }
+.token-toggle:hover { background: #2f3336; color: #fff; }
 .empty { color: #71767b; text-align: center; padding: 20px; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 500; }
 .badge-green { background: rgba(0,186,124,0.15); color: #00ba7c; }
@@ -47,9 +51,10 @@ th { color: #71767b; font-weight: 500; }
     </table>
     <div class="form-row" style="margin-top:12px">
       <input id="peer-name" placeholder="节点名称">
-      <input id="peer-addr" placeholder="地址 (host:port)">
+      <input id="peer-addr" placeholder="stcp visitor 地址，如 127.0.0.1:7000">
       <button class="btn btn-primary" onclick="addPeer()">添加节点</button>
     </div>
+    <p style="margin-top:8px;color:#71767b;font-size:0.8rem;">节点地址填写本机 frp stcp visitor 的 bind_addr:bind_port，不是业务服务端口。</p>
   </div>
 
   <div class="card">
@@ -71,10 +76,13 @@ th { color: #71767b; font-weight: 500; }
   <div class="card">
     <h2>Token 设置</h2>
     <div class="form-row">
-      <input id="token-input" placeholder="鉴权 Token" type="password">
+      <div class="token-field">
+        <input id="token-input" placeholder="鉴权 Token" type="password">
+        <button id="token-toggle" class="token-toggle" type="button" onclick="toggleToken()" title="显示 Token" aria-label="显示 Token">👁</button>
+      </div>
       <button class="btn btn-primary" onclick="saveToken()">保存</button>
     </div>
-    <p style="margin-top:8px;color:#71767b;font-size:0.8rem;">两边节点需要使用相同的 Token 才能互连</p>
+    <p style="margin-top:8px;color:#71767b;font-size:0.8rem;">首次启动会随机生成；请把其中一边的 Token 复制到另一边并保存。</p>
   </div>
 </div>
 
@@ -115,7 +123,8 @@ async function refresh() {
   }
 
   const cfg = await fetchJSON('/api/config');
-  document.getElementById('token-input').value = cfg.token || '';
+  const tokenInput = document.getElementById('token-input');
+  if (document.activeElement !== tokenInput) tokenInput.value = cfg.token || '';
 }
 
 async function addPeer() {
@@ -165,6 +174,16 @@ async function saveToken() {
   if (!token) return alert('Token 不能为空');
   await fetchJSON('/api/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token})});
   alert('已保存');
+}
+
+function toggleToken() {
+  const input = document.getElementById('token-input');
+  const button = document.getElementById('token-toggle');
+  const showing = input.type === 'text';
+  input.type = showing ? 'password' : 'text';
+  button.textContent = showing ? '👁' : '🙈';
+  button.title = showing ? '显示 Token' : '隐藏 Token';
+  button.setAttribute('aria-label', button.title);
 }
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }

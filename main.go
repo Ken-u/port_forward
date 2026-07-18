@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -105,13 +107,24 @@ func main() {
 
 func (a *App) loadConfig() {
 	data, err := os.ReadFile(a.configPath)
-	if err != nil {
-		a.config = Config{Token: "changeme"}
-		return
+	if err == nil {
+		if err := json.Unmarshal(data, &a.config); err != nil {
+			log.Fatalf("读取配置文件 %s 失败: %v", a.configPath, err)
+		}
+	} else if !os.IsNotExist(err) {
+		log.Fatalf("读取配置文件 %s 失败: %v", a.configPath, err)
 	}
-	json.Unmarshal(data, &a.config)
+
 	if a.config.Token == "" {
-		a.config.Token = "changeme"
+		tokenBytes := make([]byte, 24)
+		if _, err := rand.Read(tokenBytes); err != nil {
+			log.Fatalf("生成随机 Token 失败: %v", err)
+		}
+		a.config.Token = hex.EncodeToString(tokenBytes)
+		if err := a.saveConfig(); err != nil {
+			log.Fatalf("保存初始配置 %s 失败: %v", a.configPath, err)
+		}
+		log.Printf("已生成随机 Token 并保存到 %s", a.configPath)
 	}
 }
 
@@ -119,7 +132,13 @@ func (a *App) saveConfig() error {
 	a.mu.RLock()
 	data, _ := json.MarshalIndent(a.config, "", "  ")
 	a.mu.RUnlock()
-	return os.WriteFile(a.configPath, data, 0644)
+	if err := os.MkdirAll(filepath.Dir(a.configPath), 0700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(a.configPath, data, 0600); err != nil {
+		return err
+	}
+	return os.Chmod(a.configPath, 0600)
 }
 
 // --- Tunnel (yamux over raw TCP upgrade) ---
