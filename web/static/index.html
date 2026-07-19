@@ -22,9 +22,12 @@ th { color: #71767b; font-weight: 500; }
 .btn { display: inline-block; padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer; font-size: 0.85rem; font-weight: 500; transition: all 0.2s; }
 .btn-primary { background: #1d9bf0; color: #fff; }
 .btn-primary:hover { background: #1a8cd8; }
+.btn-secondary { background: #2f3336; color: #e7e9ea; }
+.btn-secondary:hover { background: #3b4146; }
 .btn-danger { background: #f4212e; color: #fff; }
 .btn-danger:hover { background: #dc1d28; }
 .btn-sm { padding: 5px 10px; font-size: 0.8rem; }
+.actions { display: flex; gap: 6px; }
 .form-row { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
 .form-row input, .form-row select { flex: 1; min-width: 100px; padding: 8px 12px; border-radius: 8px; border: 1px solid #2f3336; background: #0f1419; color: #e7e9ea; font-size: 0.85rem; }
 .form-row input:focus, .form-row select:focus { outline: none; border-color: #1d9bf0; }
@@ -38,6 +41,7 @@ th { color: #71767b; font-weight: 500; }
 .badge-green { background: rgba(0,186,124,0.15); color: #00ba7c; }
 .badge-red { background: rgba(244,33,46,0.15); color: #f4212e; }
 .badge-blue { background: rgba(29,155,240,0.15); color: #1d9bf0; }
+.rule-error { color: #fca5a5; font-size: 0.75rem; line-height: 1.35; margin-top: 5px; max-width: 280px; white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 680px) {
   .container { padding-top: max(16px, env(safe-area-inset-top)); padding-bottom: max(16px, env(safe-area-inset-bottom)); padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }
   h1 { font-size: 1.35rem; }
@@ -83,13 +87,14 @@ th { color: #71767b; font-weight: 500; }
         <tbody id="rules-table"><tr><td colspan="5" class="empty">暂无规则</td></tr></tbody>
       </table>
     </div>
-    <div class="form-row" style="margin-top:12px">
+    <div id="rule-form" class="form-row" style="margin-top:12px">
       <input id="rule-name" placeholder="名称" style="min-width:80px">
       <input id="rule-listen" placeholder="监听地址" value="127.0.0.1">
       <input id="rule-listen-port" placeholder="监听端口" type="number" style="max-width:100px">
       <input id="rule-target" placeholder="目标地址">
       <input id="rule-target-port" placeholder="目标端口" type="number" style="max-width:100px">
-      <button class="btn btn-primary" onclick="addRule()">添加规则</button>
+      <button id="rule-submit" class="btn btn-primary" onclick="submitRule()">添加规则</button>
+      <button id="rule-cancel" class="btn btn-secondary" onclick="cancelRuleEdit()" style="display:none">取消修改</button>
     </div>
   </div>
 
@@ -109,9 +114,12 @@ th { color: #71767b; font-weight: 500; }
 <script>
 const API = '';
 let initialTokenLoaded = false;
+let editingRuleID = null;
+let currentRules = [];
 
 async function fetchJSON(url, opts) {
   const r = await fetch(API + url, opts);
+  if (!r.ok) throw new Error((await r.text()).trim() || `HTTP ${r.status}`);
   return r.json();
 }
 
@@ -132,14 +140,23 @@ async function refresh() {
   }
 
   if (status.rules && status.rules.length) {
+    currentRules = status.rules;
     rulesT.innerHTML = status.rules.map(r => `<tr>
       <td>${esc(r.name)}</td>
       <td><code>${esc(r.listen_addr)}:${r.listen_port}</code></td>
       <td><code>${esc(r.target_addr)}:${r.target_port}</code></td>
-      <td>${r.listening?'<span class="badge badge-green">监听中</span>':'<span class="badge badge-blue">等待连接</span>'}</td>
-      <td><button class="btn btn-danger btn-sm" onclick="delRule('${r.id}')">删除</button></td>
+      <td>${r.error
+        ? `<span class="badge badge-red">启动失败</span><div class="rule-error">${esc(r.error)}</div>`
+        : r.listening
+          ? '<span class="badge badge-green">监听中</span>'
+          : '<span class="badge badge-blue">等待连接</span>'}</td>
+      <td><div class="actions">
+        <button class="btn btn-secondary btn-sm" onclick="editRule('${r.id}')">修改</button>
+        <button class="btn btn-danger btn-sm" onclick="delRule('${r.id}')">删除</button>
+      </div></td>
     </tr>`).join('');
   } else {
+    currentRules = [];
     rulesT.innerHTML = '<tr><td colspan="5" class="empty">暂无规则</td></tr>';
   }
 
@@ -175,29 +192,59 @@ async function delPeer(name) {
   refresh();
 }
 
-async function addRule() {
+async function submitRule() {
   const name = document.getElementById('rule-name').value.trim();
   const listen_addr = document.getElementById('rule-listen').value.trim();
   const listen_port = parseInt(document.getElementById('rule-listen-port').value);
   const target_addr = document.getElementById('rule-target').value.trim();
   const target_port = parseInt(document.getElementById('rule-target-port').value);
   if (!listen_port || !target_addr || !target_port) return alert('请填写完整');
-  await fetchJSON('/api/rules', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+  const rule = {
     name: name || `${listen_port}->${target_port}`,
     listen_addr: listen_addr || '127.0.0.1',
     listen_port, target_addr, target_port,
     direction: 'local', enabled: true
-  })});
+  };
+  const url = editingRuleID ? `/api/rules/${editingRuleID}` : '/api/rules';
+  const method = editingRuleID ? 'PUT' : 'POST';
+  try {
+    await fetchJSON(url, {method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(rule)});
+  } catch (err) {
+    return alert('保存规则失败：' + err.message);
+  }
+  cancelRuleEdit();
+  refresh();
+}
+
+function editRule(id) {
+  const rule = currentRules.find(r => r.id === id);
+  if (!rule) return;
+  editingRuleID = id;
+  document.getElementById('rule-name').value = rule.name || '';
+  document.getElementById('rule-listen').value = rule.listen_addr || '127.0.0.1';
+  document.getElementById('rule-listen-port').value = rule.listen_port || '';
+  document.getElementById('rule-target').value = rule.target_addr || '';
+  document.getElementById('rule-target-port').value = rule.target_port || '';
+  document.getElementById('rule-submit').textContent = '保存修改';
+  document.getElementById('rule-cancel').style.display = '';
+  document.getElementById('rule-form').scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+function cancelRuleEdit() {
+  editingRuleID = null;
   document.getElementById('rule-name').value = '';
+  document.getElementById('rule-listen').value = '127.0.0.1';
   document.getElementById('rule-listen-port').value = '';
   document.getElementById('rule-target').value = '';
   document.getElementById('rule-target-port').value = '';
-  refresh();
+  document.getElementById('rule-submit').textContent = '添加规则';
+  document.getElementById('rule-cancel').style.display = 'none';
 }
 
 async function delRule(id) {
   if (!confirm('确定删除规则？')) return;
   await fetch('/api/rules/' + id, {method:'DELETE'});
+  if (editingRuleID === id) cancelRuleEdit();
   refresh();
 }
 

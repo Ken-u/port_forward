@@ -64,6 +64,7 @@ type App struct {
 	mu         sync.RWMutex
 	peers      map[string]*PeerSession
 	listeners  map[string]net.Listener // rule ID -> listener
+	listenErrs map[string]string       // rule ID -> last listener startup error
 	listenerMu sync.Mutex
 }
 
@@ -94,6 +95,7 @@ func main() {
 		configPath: cfgPath,
 		peers:      make(map[string]*PeerSession),
 		listeners:  make(map[string]net.Listener),
+		listenErrs: make(map[string]string),
 	}
 
 	app.loadConfig()
@@ -350,6 +352,9 @@ func (a *App) startLocalListener(rule ForwardRule) {
 	addr := fmt.Sprintf("%s:%d", rule.ListenAddr, rule.ListenPort)
 	ln, err := net.Listen("tcp4", addr)
 	if err != nil {
+		a.listenerMu.Lock()
+		a.listenErrs[rule.ID] = err.Error()
+		a.listenerMu.Unlock()
 		log.Printf("监听 %s 失败: %v", addr, err)
 		return
 	}
@@ -359,6 +364,7 @@ func (a *App) startLocalListener(rule ForwardRule) {
 		old.Close()
 	}
 	a.listeners[rule.ID] = ln
+	delete(a.listenErrs, rule.ID)
 	a.listenerMu.Unlock()
 
 	target := fmt.Sprintf("%s:%d", rule.TargetAddr, rule.TargetPort)
@@ -425,6 +431,7 @@ func (a *App) stopRule(id string) {
 		ln.Close()
 		delete(a.listeners, id)
 	}
+	delete(a.listenErrs, id)
 	a.listenerMu.Unlock()
 }
 
@@ -542,17 +549,26 @@ func (a *App) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		a.stopRule(id)
+		found := false
 		a.mu.Lock()
 		for i, rule := range a.config.Rules {
 			if rule.ID == id {
 				updated.ID = id
 				a.config.Rules[i] = updated
+				found = true
 				break
 			}
 		}
 		a.mu.Unlock()
-		a.saveConfig()
+		if !found {
+			http.Error(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		a.stopRule(id)
+		if err := a.saveConfig(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if updated.Enabled && updated.Direction == "local" {
 			go a.startLocalListener(updated)
 		}
@@ -624,7 +640,8 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	type RuleStatus struct {
 		ForwardRule
-		Listening bool `json:"listening"`
+		Listening bool   `json:"listening"`
+		Error     string `json:"error,omitempty"`
 	}
 	var ps []PeerStatus
 	for _, p := range a.config.Peers {
@@ -651,7 +668,11 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	a.listenerMu.Lock()
 	for _, rule := range a.config.Rules {
 		_, listening := a.listeners[rule.ID]
-		rs = append(rs, RuleStatus{ForwardRule: rule, Listening: listening})
+		rs = append(rs, RuleStatus{
+			ForwardRule: rule,
+			Listening:   listening,
+			Error:       a.listenErrs[rule.ID],
+		})
 	}
 	a.listenerMu.Unlock()
 	a.mu.RUnlock()
