@@ -1,0 +1,15 @@
+---
+description: Always create and push a GitHub release tag after commits
+alwaysApply: true
+---
+
+# Release Tag On Commit
+
+Whenever this agent creates and pushes a commit to `main`/`master` for this repository:
+
+1. Bump a SemVer patch tag by default (`v0.1.1` → `v0.1.2`), or minor/major when the change clearly warrants it.
+2. Create an annotated tag on the new commit.
+3. Push the tag with `GIT_SSH_COMMAND="ssh -o Hostname=ssh.github.com -p 443"` when SSH port 22 is blocked.
+4. Confirm the `Build & Release` workflow starts for that tag so GitHub Release assets are published.
+
+Do not leave a pushed commit without a corresponding `v*` release tag.
