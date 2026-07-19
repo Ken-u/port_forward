@@ -2,12 +2,12 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>端口转发管理</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f1419; color: #e7e9ea; min-height: 100vh; }
-.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f1419; color: #e7e9ea; min-height: 100vh; overflow-x: hidden; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px; padding-left: max(24px, env(safe-area-inset-left)); padding-right: max(24px, env(safe-area-inset-right)); }
 h1 { font-size: 1.6rem; margin-bottom: 8px; color: #fff; }
 .subtitle { color: #71767b; margin-bottom: 24px; font-size: 0.9rem; }
 .card { background: #1a1f25; border: 1px solid #2f3336; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
@@ -16,6 +16,7 @@ h1 { font-size: 1.6rem; margin-bottom: 8px; color: #fff; }
 .status-dot.online { background: #00ba7c; }
 .status-dot.offline { background: #f4212e; }
 table { width: 100%; border-collapse: collapse; }
+.table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #2f3336; font-size: 0.9rem; }
 th { color: #71767b; font-weight: 500; }
 .btn { display: inline-block; padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer; font-size: 0.85rem; font-weight: 500; transition: all 0.2s; }
@@ -31,11 +32,26 @@ th { color: #71767b; font-weight: 500; }
 .token-field input { width: 100%; padding-right: 44px; }
 .token-toggle { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 36px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #aeb4b9; cursor: pointer; font-size: 1rem; }
 .token-toggle:hover { background: #2f3336; color: #fff; }
+.token-toggle:disabled { cursor: default; opacity: 0.35; background: transparent; }
 .empty { color: #71767b; text-align: center; padding: 20px; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 500; }
 .badge-green { background: rgba(0,186,124,0.15); color: #00ba7c; }
 .badge-red { background: rgba(244,33,46,0.15); color: #f4212e; }
 .badge-blue { background: rgba(29,155,240,0.15); color: #1d9bf0; }
+@media (max-width: 680px) {
+  .container { padding-top: max(16px, env(safe-area-inset-top)); padding-bottom: max(16px, env(safe-area-inset-bottom)); padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }
+  h1 { font-size: 1.35rem; }
+  .subtitle { margin-bottom: 16px; line-height: 1.5; }
+  .card { padding: 14px; border-radius: 10px; }
+  .table-scroll { margin: 0 -4px; width: calc(100% + 8px); }
+  table { min-width: 560px; }
+  th, td { padding: 9px 8px; font-size: 0.82rem; white-space: nowrap; }
+  .form-row { flex-direction: column; gap: 8px; }
+  .form-row input, .form-row select, .token-field { width: 100%; max-width: none !important; min-height: 44px; }
+  .form-row > .btn { width: 100%; min-height: 44px; }
+  .btn-sm { min-height: 36px; }
+  .token-toggle { width: 40px; height: 36px; }
+}
 </style>
 </head>
 <body>
@@ -45,10 +61,12 @@ th { color: #71767b; font-weight: 500; }
 
   <div class="card">
     <h2>节点</h2>
-    <table>
-      <thead><tr><th>名称</th><th>地址</th><th>状态</th><th>操作</th></tr></thead>
-      <tbody id="peers-table"><tr><td colspan="4" class="empty">暂无节点</td></tr></tbody>
-    </table>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>名称</th><th>地址</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="peers-table"><tr><td colspan="4" class="empty">暂无节点</td></tr></tbody>
+      </table>
+    </div>
     <div class="form-row" style="margin-top:12px">
       <input id="peer-name" placeholder="节点名称">
       <input id="peer-addr" placeholder="stcp visitor 地址，如 127.0.0.1:7000">
@@ -59,10 +77,12 @@ th { color: #71767b; font-weight: 500; }
 
   <div class="card">
     <h2>转发规则</h2>
-    <table>
-      <thead><tr><th>名称</th><th>本地监听</th><th>目标地址</th><th>状态</th><th>操作</th></tr></thead>
-      <tbody id="rules-table"><tr><td colspan="5" class="empty">暂无规则</td></tr></tbody>
-    </table>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>名称</th><th>本地监听</th><th>目标地址</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="rules-table"><tr><td colspan="5" class="empty">暂无规则</td></tr></tbody>
+      </table>
+    </div>
     <div class="form-row" style="margin-top:12px">
       <input id="rule-name" placeholder="名称" style="min-width:80px">
       <input id="rule-listen" placeholder="监听地址" value="127.0.0.1">
@@ -77,17 +97,18 @@ th { color: #71767b; font-weight: 500; }
     <h2>Token 设置</h2>
     <div class="form-row">
       <div class="token-field">
-        <input id="token-input" placeholder="鉴权 Token" type="password">
-        <button id="token-toggle" class="token-toggle" type="button" onclick="toggleToken()" title="显示 Token" aria-label="显示 Token">👁</button>
+        <input id="token-input" placeholder="已配置（不会回显）" type="password" oninput="document.getElementById('token-toggle').disabled=!this.value">
+        <button id="token-toggle" class="token-toggle" type="button" onclick="toggleToken()" title="显示 Token" aria-label="显示 Token" disabled>👁</button>
       </div>
       <button class="btn btn-primary" onclick="saveToken()">保存</button>
     </div>
-    <p style="margin-top:8px;color:#71767b;font-size:0.8rem;">首次启动会随机生成；请把其中一边的 Token 复制到另一边并保存。</p>
+    <p id="token-help" style="margin-top:8px;color:#71767b;font-size:0.8rem;">已配置的 Token 不会回显；输入新 Token 并保存可进行更换。</p>
   </div>
 </div>
 
 <script>
 const API = '';
+let initialTokenLoaded = false;
 
 async function fetchJSON(url, opts) {
   const r = await fetch(API + url, opts);
@@ -124,7 +145,18 @@ async function refresh() {
 
   const cfg = await fetchJSON('/api/config');
   const tokenInput = document.getElementById('token-input');
-  if (document.activeElement !== tokenInput) tokenInput.value = cfg.token || '';
+  const tokenToggle = document.getElementById('token-toggle');
+  const tokenHelp = document.getElementById('token-help');
+  if (cfg.token) {
+    tokenInput.value = cfg.token;
+    initialTokenLoaded = true;
+    tokenToggle.disabled = false;
+    tokenHelp.textContent = '首次生成的 Token 仅显示这一次，请现在复制到另一端并保存。刷新页面后将不再回显。';
+  } else if (!initialTokenLoaded && document.activeElement !== tokenInput) {
+    tokenInput.value = '';
+    tokenInput.placeholder = cfg.has_token ? '已配置（不会回显）' : '输入鉴权 Token';
+    tokenToggle.disabled = true;
+  }
 }
 
 async function addPeer() {
@@ -173,12 +205,20 @@ async function saveToken() {
   const token = document.getElementById('token-input').value.trim();
   if (!token) return alert('Token 不能为空');
   await fetchJSON('/api/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token})});
+  const input = document.getElementById('token-input');
+  input.value = '';
+  input.type = 'password';
+  input.placeholder = '已配置（不会回显）';
+  initialTokenLoaded = false;
+  document.getElementById('token-toggle').disabled = true;
+  document.getElementById('token-help').textContent = 'Token 已保存且不再回显；如需重新配对，请输入新 Token。';
   alert('已保存');
 }
 
 function toggleToken() {
   const input = document.getElementById('token-input');
   const button = document.getElementById('token-toggle');
+  if (!input.value) return;
   const showing = input.type === 'text';
   input.type = showing ? 'password' : 'text';
   button.textContent = showing ? '👁' : '🙈';

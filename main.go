@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,9 +39,10 @@ type ForwardRule struct {
 }
 
 type Config struct {
-	Token string        `json:"token"`
-	Peers []PeerConfig  `json:"peers"`
-	Rules []ForwardRule `json:"rules"`
+	Token              string        `json:"token"`
+	TokenPendingReveal bool          `json:"token_pending_reveal,omitempty"`
+	Peers              []PeerConfig  `json:"peers"`
+	Rules              []ForwardRule `json:"rules"`
 }
 
 type PeerConfig struct {
@@ -65,6 +68,7 @@ type App struct {
 }
 
 func main() {
+	host := flag.String("host", "0.0.0.0", "主端口监听 IPv4 地址")
 	port := flag.Int("port", 9000, "主端口（管理网页+隧道）")
 	configFile := flag.String("config", "", "配置文件路径（默认 ~/.port_fwd.json）")
 	flag.Parse()
@@ -73,6 +77,16 @@ func main() {
 	if cfgPath == "" {
 		home, _ := os.UserHomeDir()
 		cfgPath = filepath.Join(home, ".port_fwd.json")
+	}
+
+	if flag.NArg() > 0 {
+		if flag.NArg() != 1 || flag.Arg(0) != "reset" {
+			log.Fatalf("未知命令 %q；可用命令: reset", flag.Arg(0))
+		}
+		if err := resetConfig(cfgPath); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 
 	app := &App{
@@ -96,14 +110,32 @@ func main() {
 	mux.HandleFunc("/tunnel", app.handleTunnel)
 	mux.HandleFunc("/", app.handleWeb)
 
-	addr := fmt.Sprintf(":%d", app.port)
-	log.Printf("port_fwd %s 启动: http://0.0.0.0%s", version, addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	addr := net.JoinHostPort(*host, strconv.Itoa(app.port))
+	log.Printf("port_fwd %s 启动: http://%s", version, addr)
+	listener, err := net.Listen("tcp4", addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	server := &http.Server{Handler: mux}
+	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }
 
 // --- Config ---
+
+func resetConfig(path string) error {
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		fmt.Printf("配置文件不存在，无需清除: %s\n", path)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("清除配置 %s 失败: %w", path, err)
+	}
+	fmt.Printf("已清除配置: %s\n", path)
+	return nil
+}
 
 func (a *App) loadConfig() {
 	data, err := os.ReadFile(a.configPath)
@@ -121,6 +153,7 @@ func (a *App) loadConfig() {
 			log.Fatalf("生成随机 Token 失败: %v", err)
 		}
 		a.config.Token = hex.EncodeToString(tokenBytes)
+		a.config.TokenPendingReveal = true
 		if err := a.saveConfig(); err != nil {
 			log.Fatalf("保存初始配置 %s 失败: %v", a.configPath, err)
 		}
@@ -315,7 +348,7 @@ func (a *App) startLocalRules() {
 
 func (a *App) startLocalListener(rule ForwardRule) {
 	addr := fmt.Sprintf("%s:%d", rule.ListenAddr, rule.ListenPort)
-	ln, err := net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp4", addr)
 	if err != nil {
 		log.Printf("监听 %s 失败: %v", addr, err)
 		return
@@ -400,19 +433,54 @@ func (a *App) stopRule(id string) {
 func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		a.mu.RLock()
-		json.NewEncoder(w).Encode(a.config)
-		a.mu.RUnlock()
+		a.mu.Lock()
+		response := struct {
+			Token    string `json:"token,omitempty"`
+			HasToken bool   `json:"has_token"`
+			FirstRun bool   `json:"first_run"`
+		}{
+			HasToken: a.config.Token != "",
+			FirstRun: a.config.TokenPendingReveal,
+		}
+		if a.config.TokenPendingReveal {
+			response.Token = a.config.Token
+			a.config.TokenPendingReveal = false
+		}
+		a.mu.Unlock()
+
+		if response.FirstRun {
+			if err := a.saveConfig(); err != nil {
+				a.mu.Lock()
+				a.config.TokenPendingReveal = true
+				a.mu.Unlock()
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
 	case http.MethodPut:
-		var cfg Config
-		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		var request struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
+		request.Token = strings.TrimSpace(request.Token)
+		if request.Token == "" {
+			http.Error(w, "Token 不能为空", http.StatusBadRequest)
+			return
+		}
 		a.mu.Lock()
-		a.config.Token = cfg.Token
+		a.config.Token = request.Token
+		a.config.TokenPendingReveal = false
 		a.mu.Unlock()
-		a.saveConfig()
+		if err := a.saveConfig(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	default:
 		http.Error(w, "method not allowed", 405)
