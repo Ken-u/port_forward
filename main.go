@@ -494,6 +494,25 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func validateRule(rule ForwardRule) error {
+	if rule.ListenPort < 1 || rule.ListenPort > 65535 {
+		return fmt.Errorf("本地监听端口必须是 1–65535")
+	}
+	if rule.ListenPort < 1024 {
+		return fmt.Errorf("本地端口 %d 属于特权端口（1–1023），普通用户没有权限绑定，请改用 1024–65535", rule.ListenPort)
+	}
+	if strings.TrimSpace(rule.TargetAddr) == "" {
+		return fmt.Errorf("目标地址不能为空")
+	}
+	if rule.TargetPort < 1 || rule.TargetPort > 65535 {
+		return fmt.Errorf("目标端口必须是 1–65535")
+	}
+	if strings.TrimSpace(rule.ListenAddr) == "" {
+		return fmt.Errorf("监听地址不能为空")
+	}
+	return nil
+}
+
 func (a *App) handleRules(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -504,6 +523,10 @@ func (a *App) handleRules(w http.ResponseWriter, r *http.Request) {
 		var rule ForwardRule
 		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
 			http.Error(w, err.Error(), 400)
+			return
+		}
+		if err := validateRule(rule); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if rule.ID == "" {
@@ -547,6 +570,10 @@ func (a *App) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 		var updated ForwardRule
 		if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
 			http.Error(w, err.Error(), 400)
+			return
+		}
+		if err := validateRule(updated); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		found := false

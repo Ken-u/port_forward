@@ -31,27 +31,38 @@ th { color: #71767b; font-weight: 500; }
 .form-row { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
 .form-row input, .form-row select { flex: 1; min-width: 100px; padding: 8px 12px; border-radius: 8px; border: 1px solid #2f3336; background: #0f1419; color: #e7e9ea; font-size: 0.85rem; }
 .form-row input:focus, .form-row select:focus { outline: none; border-color: #1d9bf0; }
+.form-row input.invalid { border-color: #f4212e; }
+.target-group { display: flex; flex: 2; min-width: 180px; gap: 8px; }
+.target-group input { flex: 1; min-width: 0; }
+.target-group select { flex: 0 0 140px; max-width: 160px; }
 .token-field { display: flex; flex: 1; position: relative; }
 .token-field input { width: 100%; padding-right: 44px; }
 .token-toggle { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 36px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #aeb4b9; cursor: pointer; font-size: 1rem; }
 .token-toggle:hover { background: #2f3336; color: #fff; }
 .token-toggle:disabled { cursor: default; opacity: 0.35; background: transparent; }
 .empty { color: #71767b; text-align: center; padding: 20px; }
+.hint { margin-top: 8px; color: #71767b; font-size: 0.8rem; line-height: 1.5; }
+.hint.warn { color: #fbbf24; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 500; }
 .badge-green { background: rgba(0,186,124,0.15); color: #00ba7c; }
 .badge-red { background: rgba(244,33,46,0.15); color: #f4212e; }
 .badge-blue { background: rgba(29,155,240,0.15); color: #1d9bf0; }
 .rule-error { color: #fca5a5; font-size: 0.75rem; line-height: 1.35; margin-top: 5px; max-width: 280px; white-space: normal; overflow-wrap: anywhere; }
+.listen-link { color: #1d9bf0; text-decoration: none; }
+.listen-link:hover { text-decoration: underline; }
+.listen-text { color: #e7e9ea; }
 @media (max-width: 680px) {
   .container { padding-top: max(16px, env(safe-area-inset-top)); padding-bottom: max(16px, env(safe-area-inset-bottom)); padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }
   h1 { font-size: 1.35rem; }
   .subtitle { margin-bottom: 16px; line-height: 1.5; }
   .card { padding: 14px; border-radius: 10px; }
   .table-scroll { margin: 0 -4px; width: calc(100% + 8px); }
-  table { min-width: 560px; }
+  table { min-width: 620px; }
   th, td { padding: 9px 8px; font-size: 0.82rem; white-space: nowrap; }
   .form-row { flex-direction: column; gap: 8px; }
-  .form-row input, .form-row select, .token-field { width: 100%; max-width: none !important; min-height: 44px; }
+  .form-row input, .form-row select, .token-field, .target-group { width: 100%; max-width: none !important; min-height: 44px; }
+  .target-group { flex-direction: column; }
+  .target-group select { max-width: none; flex: none; }
   .form-row > .btn { width: 100%; min-height: 44px; }
   .btn-sm { min-height: 36px; }
   .token-toggle { width: 40px; height: 36px; }
@@ -76,7 +87,7 @@ th { color: #71767b; font-weight: 500; }
       <input id="peer-addr" placeholder="stcp visitor 地址，如 127.0.0.1:7000">
       <button class="btn btn-primary" onclick="addPeer()">添加节点</button>
     </div>
-    <p style="margin-top:8px;color:#71767b;font-size:0.8rem;">节点地址填写本机 frp stcp visitor 的 bind_addr:bind_port，不是业务服务端口。</p>
+    <p class="hint">节点地址填写本机 frp stcp visitor 的 bind_addr:bind_port，不是业务服务端口。</p>
   </div>
 
   <div class="card">
@@ -89,13 +100,19 @@ th { color: #71767b; font-weight: 500; }
     </div>
     <div id="rule-form" class="form-row" style="margin-top:12px">
       <input id="rule-name" placeholder="名称" style="min-width:80px">
-      <input id="rule-listen" placeholder="监听地址" value="127.0.0.1">
-      <input id="rule-listen-port" placeholder="监听端口" type="number" style="max-width:100px">
-      <input id="rule-target" placeholder="目标地址">
-      <input id="rule-target-port" placeholder="目标端口" type="number" style="max-width:100px">
+      <input id="rule-listen" placeholder="监听地址">
+      <input id="rule-listen-port" placeholder="监听端口 1024-65535" type="number" min="1" max="65535" style="max-width:150px" oninput="updatePortHint()">
+      <div class="target-group">
+        <input id="rule-target" placeholder="目标地址（留空后从右侧选择）">
+        <select id="rule-target-history" onchange="applyTargetHistory()" title="常用目标 IP">
+          <option value="">常用目标 IP</option>
+        </select>
+      </div>
+      <input id="rule-target-port" placeholder="目标端口" type="number" min="1" max="65535" style="max-width:110px">
       <button id="rule-submit" class="btn btn-primary" onclick="submitRule()">添加规则</button>
       <button id="rule-cancel" class="btn btn-secondary" onclick="cancelRuleEdit()" style="display:none">取消修改</button>
     </div>
+    <p id="rule-port-hint" class="hint">本地监听端口建议使用 1024–65535。1–1023 为系统特权端口，普通用户启动会报权限不足。</p>
   </div>
 
   <div class="card">
@@ -107,15 +124,131 @@ th { color: #71767b; font-weight: 500; }
       </div>
       <button class="btn btn-primary" onclick="saveToken()">保存</button>
     </div>
-    <p id="token-help" style="margin-top:8px;color:#71767b;font-size:0.8rem;">已配置的 Token 不会回显；输入新 Token 并保存可进行更换。</p>
+    <p id="token-help" class="hint">已配置的 Token 不会回显；输入新 Token 并保存可进行更换。</p>
   </div>
 </div>
 
 <script>
 const API = '';
+const TARGET_HISTORY_KEY = 'port_fwd_target_ips';
 let initialTokenLoaded = false;
 let editingRuleID = null;
 let currentRules = [];
+
+function pageHost() {
+  const host = (location.hostname || '').trim();
+  if (!host || host === 'localhost') return '127.0.0.1';
+  return host;
+}
+
+function defaultListenAddr() {
+  return pageHost();
+}
+
+function loadTargetHistory() {
+  try {
+    const raw = localStorage.getItem(TARGET_HISTORY_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list.filter(Boolean) : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveTargetHistory(addr) {
+  if (!addr) return;
+  const list = loadTargetHistory().filter(item => item !== addr);
+  list.unshift(addr);
+  localStorage.setItem(TARGET_HISTORY_KEY, JSON.stringify(list.slice(0, 20)));
+}
+
+function collectTargetIPs() {
+  const seen = new Set();
+  const list = [];
+  for (const addr of loadTargetHistory()) {
+    if (!seen.has(addr)) {
+      seen.add(addr);
+      list.push(addr);
+    }
+  }
+  for (const rule of currentRules) {
+    const addr = (rule.target_addr || '').trim();
+    if (addr && !seen.has(addr)) {
+      seen.add(addr);
+      list.push(addr);
+    }
+  }
+  return list;
+}
+
+function refreshTargetHistoryOptions() {
+  const select = document.getElementById('rule-target-history');
+  const current = select.value;
+  const ips = collectTargetIPs();
+  select.innerHTML = '<option value="">常用目标 IP</option>' +
+    ips.map(ip => `<option value="${esc(ip)}">${esc(ip)}</option>`).join('');
+  if (current && ips.includes(current)) select.value = current;
+}
+
+function applyTargetHistory() {
+  const select = document.getElementById('rule-target-history');
+  if (select.value) document.getElementById('rule-target').value = select.value;
+}
+
+function listenURL(rule) {
+  let host = (rule.listen_addr || '').trim();
+  if (!host || host === '0.0.0.0' || host === '::' || host === '[::]') {
+    host = pageHost();
+  }
+  if (host.includes(':') && !host.startsWith('[')) host = `[${host}]`;
+  return `http://${host}:${rule.listen_port}`;
+}
+
+function renderListenCell(rule) {
+  const label = `${rule.listen_addr}:${rule.listen_port}`;
+  if (!rule.listening || rule.error) {
+    return `<span class="listen-text"><code>${esc(label)}</code></span>`;
+  }
+  const url = listenURL(rule);
+  return `<a class="listen-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="在新标签页打开 ${esc(url)}"><code>${esc(label)}</code></a>`;
+}
+
+function updatePortHint() {
+  const input = document.getElementById('rule-listen-port');
+  const hint = document.getElementById('rule-port-hint');
+  const value = input.value.trim();
+  input.classList.remove('invalid');
+  if (!value) {
+    hint.className = 'hint';
+    hint.textContent = '本地监听端口建议使用 1024–65535。1–1023 为系统特权端口，普通用户启动会报权限不足。';
+    return;
+  }
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    input.classList.add('invalid');
+    hint.className = 'hint warn';
+    hint.textContent = '端口必须是 1–65535 的整数。';
+    return;
+  }
+  if (port < 1024) {
+    input.classList.add('invalid');
+    hint.className = 'hint warn';
+    hint.textContent = `端口 ${port} 属于特权端口（1–1023）。普通用户启动会报权限不足，请改用 1024–65535。`;
+    return;
+  }
+  hint.className = 'hint';
+  hint.textContent = '本地监听端口建议使用 1024–65535。1–1023 为系统特权端口，普通用户启动会报权限不足。';
+}
+
+function validateListenPort(port) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return '本地监听端口必须是 1–65535 的整数';
+  }
+  if (port < 1024) {
+    return `本地端口 ${port} 属于特权端口（1–1023），普通用户没有权限绑定，请改用 1024–65535`;
+  }
+  return '';
+}
 
 async function fetchJSON(url, opts) {
   const r = await fetch(API + url, opts);
@@ -143,7 +276,7 @@ async function refresh() {
     currentRules = status.rules;
     rulesT.innerHTML = status.rules.map(r => `<tr>
       <td>${esc(r.name)}</td>
-      <td><code>${esc(r.listen_addr)}:${r.listen_port}</code></td>
+      <td>${renderListenCell(r)}</td>
       <td><code>${esc(r.target_addr)}:${r.target_port}</code></td>
       <td>${r.error
         ? `<span class="badge badge-red">启动失败</span><div class="rule-error">${esc(r.error)}</div>`
@@ -158,6 +291,12 @@ async function refresh() {
   } else {
     currentRules = [];
     rulesT.innerHTML = '<tr><td colspan="5" class="empty">暂无规则</td></tr>';
+  }
+  refreshTargetHistoryOptions();
+
+  const listenInput = document.getElementById('rule-listen');
+  if (!editingRuleID && document.activeElement !== listenInput && !listenInput.value.trim()) {
+    listenInput.value = defaultListenAddr();
   }
 
   const cfg = await fetchJSON('/api/config');
@@ -194,14 +333,21 @@ async function delPeer(name) {
 
 async function submitRule() {
   const name = document.getElementById('rule-name').value.trim();
-  const listen_addr = document.getElementById('rule-listen').value.trim();
-  const listen_port = parseInt(document.getElementById('rule-listen-port').value);
+  const listen_addr = document.getElementById('rule-listen').value.trim() || defaultListenAddr();
+  const listen_port = parseInt(document.getElementById('rule-listen-port').value, 10);
   const target_addr = document.getElementById('rule-target').value.trim();
-  const target_port = parseInt(document.getElementById('rule-target-port').value);
-  if (!listen_port || !target_addr || !target_port) return alert('请填写完整');
+  const target_port = parseInt(document.getElementById('rule-target-port').value, 10);
+  const portError = validateListenPort(listen_port);
+  if (portError) {
+    updatePortHint();
+    return alert(portError);
+  }
+  if (!target_addr || !Number.isInteger(target_port) || target_port < 1 || target_port > 65535) {
+    return alert('请填写完整的目标地址和目标端口（1–65535）');
+  }
   const rule = {
     name: name || `${listen_port}->${target_port}`,
-    listen_addr: listen_addr || '127.0.0.1',
+    listen_addr,
     listen_port, target_addr, target_port,
     direction: 'local', enabled: true
   };
@@ -212,6 +358,7 @@ async function submitRule() {
   } catch (err) {
     return alert('保存规则失败：' + err.message);
   }
+  saveTargetHistory(target_addr);
   cancelRuleEdit();
   refresh();
 }
@@ -221,24 +368,28 @@ function editRule(id) {
   if (!rule) return;
   editingRuleID = id;
   document.getElementById('rule-name').value = rule.name || '';
-  document.getElementById('rule-listen').value = rule.listen_addr || '127.0.0.1';
+  document.getElementById('rule-listen').value = rule.listen_addr || defaultListenAddr();
   document.getElementById('rule-listen-port').value = rule.listen_port || '';
   document.getElementById('rule-target').value = rule.target_addr || '';
   document.getElementById('rule-target-port').value = rule.target_port || '';
+  document.getElementById('rule-target-history').value = '';
   document.getElementById('rule-submit').textContent = '保存修改';
   document.getElementById('rule-cancel').style.display = '';
+  updatePortHint();
   document.getElementById('rule-form').scrollIntoView({behavior:'smooth', block:'center'});
 }
 
 function cancelRuleEdit() {
   editingRuleID = null;
   document.getElementById('rule-name').value = '';
-  document.getElementById('rule-listen').value = '127.0.0.1';
+  document.getElementById('rule-listen').value = defaultListenAddr();
   document.getElementById('rule-listen-port').value = '';
   document.getElementById('rule-target').value = '';
   document.getElementById('rule-target-port').value = '';
+  document.getElementById('rule-target-history').value = '';
   document.getElementById('rule-submit').textContent = '添加规则';
   document.getElementById('rule-cancel').style.display = 'none';
+  updatePortHint();
 }
 
 async function delRule(id) {
@@ -273,8 +424,10 @@ function toggleToken() {
   button.setAttribute('aria-label', button.title);
 }
 
-function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
 
+document.getElementById('rule-listen').value = defaultListenAddr();
+updatePortHint();
 refresh();
 setInterval(refresh, 3000);
 </script>
