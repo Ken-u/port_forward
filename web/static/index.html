@@ -109,8 +109,8 @@ th { color: #71767b; font-weight: 500; }
     <h2>节点</h2>
     <div class="table-scroll">
       <table>
-        <thead><tr><th>名称</th><th>地址</th><th>状态</th><th>操作</th></tr></thead>
-        <tbody id="peers-table"><tr><td colspan="4" class="empty">暂无节点</td></tr></tbody>
+        <thead><tr><th>名称</th><th>地址</th><th>对端身份</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="peers-table"><tr><td colspan="5" class="empty">暂无节点</td></tr></tbody>
       </table>
     </div>
     <div class="form-row" style="margin-top:12px">
@@ -118,7 +118,7 @@ th { color: #71767b; font-weight: 500; }
       <input id="peer-addr" placeholder="stcp visitor 地址，如 127.0.0.1:7000">
       <button class="btn btn-primary" onclick="addPeer()">添加节点</button>
     </div>
-    <p class="hint">节点地址填写本机 frp stcp visitor 的 bind_addr:bind_port，不是业务服务端口。</p>
+    <p class="hint">节点地址填写本机 frp stcp visitor 的 bind_addr:bind_port，必须指向<strong>家里</strong>的 port_fwd，不能指向公司自己。若状态显示「指向本机/无效自环」，说明节点配错了。</p>
   </div>
 
   <div class="card">
@@ -306,11 +306,16 @@ async function refresh() {
     peersT.innerHTML = status.peers.map(p => `<tr>
       <td>${esc(p.name)}</td>
       <td><code>${esc(p.addr)}</code></td>
-      <td><span class="status-dot ${p.connected?'online':'offline'}"></span>${p.connected?'<span class="badge badge-green">已连接</span>':'<span class="badge badge-red">未连接</span>'}</td>
+      <td>${p.connected
+        ? (p.self
+          ? `<span class="badge badge-red">指向本机</span><div class="rule-error">remote=${esc(p.remote_hostname || '')} ips=${esc(p.remote_ips || '')}</div>`
+          : `<code>${esc(p.remote_hostname || '?')}</code><div class="hint" style="margin:4px 0 0">${esc(p.remote_ips || '')}</div>`)
+        : '<span class="badge badge-red">未知</span>'}</td>
+      <td><span class="status-dot ${p.connected?'online':'offline'}"></span>${p.connected?(p.self?'<span class="badge badge-red">无效自环</span>':'<span class="badge badge-green">已连接</span>'):'<span class="badge badge-red">未连接</span>'}</td>
       <td><button class="btn btn-danger btn-sm" onclick="delPeer('${esc(p.name)}')">删除</button></td>
     </tr>`).join('');
   } else {
-    peersT.innerHTML = '<tr><td colspan="4" class="empty">暂无节点</td></tr>';
+    peersT.innerHTML = '<tr><td colspan="5" class="empty">暂无节点</td></tr>';
   }
 
   if (status.rules && status.rules.length) {

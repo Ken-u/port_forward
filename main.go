@@ -54,10 +54,13 @@ type PeerConfig struct {
 }
 
 type PeerSession struct {
-	Name    string
-	Addr    string
-	Session *yamux.Session
-	mu      sync.Mutex
+	Name           string
+	Addr           string
+	RemoteHostname string
+	RemoteIPs      string
+	Self           bool
+	Session        *yamux.Session
+	mu             sync.Mutex
 }
 
 type App struct {
@@ -218,9 +221,30 @@ func (a *App) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("节点连入: %s (%s)", peerName, r.RemoteAddr)
+	remote, err := a.exchangeHelloAsServer(session)
+	if err != nil {
+		log.Printf("节点身份握手失败(%s): %v", peerName, err)
+		session.Close()
+		return
+	}
+	if remote.Hostname != "" {
+		peerName = remote.Hostname
+	}
 
-	ps := &PeerSession{Name: peerName, Addr: r.RemoteAddr, Session: session}
+	ps := &PeerSession{
+		Name:           peerName,
+		Addr:           r.RemoteAddr,
+		RemoteHostname: remote.Hostname,
+		RemoteIPs:      remote.IPs,
+		Self:           isSelfPeer(remote.Hostname, remote.IPs),
+		Session:        session,
+	}
+	if ps.Self {
+		log.Printf("警告: 连入节点 %s 实际是本机(ips=%s)。若用「对端拨号」，会在本机执行，无法访问对端内网。", peerName, remote.IPs)
+	} else {
+		log.Printf("节点连入: %s (%s) ips=%s", peerName, r.RemoteAddr, remote.IPs)
+	}
+
 	a.mu.Lock()
 	a.peers[peerName] = ps
 	a.mu.Unlock()
@@ -336,9 +360,27 @@ func (a *App) dialPeer(p PeerConfig) {
 		return
 	}
 
-	log.Printf("已连接节点: %s (%s)", p.Name, p.Addr)
+	remote, err := a.exchangeHelloAsClient(session)
+	if err != nil {
+		log.Printf("节点身份握手失败(%s): %v", p.Name, err)
+		session.Close()
+		return
+	}
 
-	ps := &PeerSession{Name: p.Name, Addr: p.Addr, Session: session}
+	ps := &PeerSession{
+		Name:           p.Name,
+		Addr:           p.Addr,
+		RemoteHostname: remote.Hostname,
+		RemoteIPs:      remote.IPs,
+		Self:           isSelfPeer(remote.Hostname, remote.IPs),
+		Session:        session,
+	}
+	if ps.Self {
+		log.Printf("警告: 节点 %s (%s) 实际连回了本机(ips=%s)。请把节点地址改成家里 frp visitor，而不是公司本机。", p.Name, p.Addr, remote.IPs)
+	} else {
+		log.Printf("已连接节点: %s (%s) remote=%s ips=%s", p.Name, p.Addr, remote.Hostname, remote.IPs)
+	}
+
 	a.mu.Lock()
 	a.peers[p.Name] = ps
 	a.mu.Unlock()
@@ -413,36 +455,53 @@ func (a *App) forwardLocal(local net.Conn, target string) {
 	hostname, _ := os.Hostname()
 	remote, err := net.DialTimeout("tcp4", target, 15*time.Second)
 	if err != nil {
-		log.Printf("本机(%s)本地拨号 %s 失败: %v", hostname, target, err)
+		log.Printf("本机(%s)本地拨号 %s 失败: %v —— 「目标在本机网络」会由监听端拨号；要让家里拨，请改选「目标在对端网络」且节点必须是家里", hostname, target, err)
 		return
 	}
 	defer remote.Close()
 	relay(local, remote)
 }
 
-func (a *App) pickPeerSession() (name string, session *yamux.Session) {
+func (a *App) pickPeerSession() (name string, session *yamux.Session, self bool, remoteHost, remoteIPs string) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	names := make([]string, 0, len(a.peers))
+
+	type candidate struct {
+		name       string
+		session    *yamux.Session
+		self       bool
+		remoteHost string
+		remoteIPs  string
+	}
+	var all []candidate
 	for n, ps := range a.peers {
 		if ps != nil && ps.Session != nil && !ps.Session.IsClosed() {
-			names = append(names, n)
+			all = append(all, candidate{n, ps.Session, ps.Self, ps.RemoteHostname, ps.RemoteIPs})
 		}
 	}
-	if len(names) == 0 {
-		return "", nil
+	if len(all) == 0 {
+		return "", nil, false, "", ""
 	}
-	sort.Strings(names)
-	name = names[0]
-	return name, a.peers[name].Session
+	sort.Slice(all, func(i, j int) bool { return all[i].name < all[j].name })
+	for _, c := range all {
+		if !c.self {
+			return c.name, c.session, false, c.remoteHost, c.remoteIPs
+		}
+	}
+	c := all[0]
+	return c.name, c.session, true, c.remoteHost, c.remoteIPs
 }
 
 func (a *App) forwardToPeer(local net.Conn, target string) {
 	defer local.Close()
 
-	peerName, session := a.pickPeerSession()
+	peerName, session, self, remoteHost, remoteIPs := a.pickPeerSession()
 	if session == nil {
 		log.Printf("无可用节点，丢弃连接到 %s", target)
+		return
+	}
+	if self {
+		log.Printf("拒绝转发 %s: 节点 %s 实际是本机(remote=%s ips=%s)。请把节点地址改成家里的 port_fwd（frp visitor），不要连回公司自己。", target, peerName, remoteHost, remoteIPs)
 		return
 	}
 
@@ -453,7 +512,7 @@ func (a *App) forwardToPeer(local net.Conn, target string) {
 	}
 	defer stream.Close()
 
-	log.Printf("经节点 %s 请求拨号 %s", peerName, target)
+	log.Printf("经节点 %s(remote=%s ips=%s) 请求拨号 %s", peerName, remoteHost, remoteIPs, target)
 	if err := writeJSONFrame(stream, map[string]string{"target": target}); err != nil {
 		log.Printf("发送转发请求失败: %v", err)
 		return
@@ -735,9 +794,12 @@ func (a *App) handlePeerByID(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	a.mu.RLock()
 	type PeerStatus struct {
-		Name      string `json:"name"`
-		Addr      string `json:"addr"`
-		Connected bool   `json:"connected"`
+		Name           string `json:"name"`
+		Addr           string `json:"addr"`
+		Connected      bool   `json:"connected"`
+		RemoteHostname string `json:"remote_hostname,omitempty"`
+		RemoteIPs      string `json:"remote_ips,omitempty"`
+		Self           bool   `json:"self"`
 	}
 	type RuleStatus struct {
 		ForwardRule
@@ -746,11 +808,14 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	var ps []PeerStatus
 	for _, p := range a.config.Peers {
-		connected := false
+		item := PeerStatus{Name: p.Name, Addr: p.Addr}
 		if sess, ok := a.peers[p.Name]; ok && sess.Session != nil && !sess.Session.IsClosed() {
-			connected = true
+			item.Connected = true
+			item.RemoteHostname = sess.RemoteHostname
+			item.RemoteIPs = sess.RemoteIPs
+			item.Self = sess.Self
 		}
-		ps = append(ps, PeerStatus{Name: p.Name, Addr: p.Addr, Connected: connected})
+		ps = append(ps, item)
 	}
 	// include incoming peers not in config
 	for name, sess := range a.peers {
@@ -762,7 +827,14 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !found {
-			ps = append(ps, PeerStatus{Name: name, Addr: sess.Addr, Connected: !sess.Session.IsClosed()})
+			ps = append(ps, PeerStatus{
+				Name:           name,
+				Addr:           sess.Addr,
+				Connected:      sess.Session != nil && !sess.Session.IsClosed(),
+				RemoteHostname: sess.RemoteHostname,
+				RemoteIPs:      sess.RemoteIPs,
+				Self:           sess.Self,
+			})
 		}
 	}
 	var rs []RuleStatus
@@ -886,6 +958,79 @@ func localIPv4List() string {
 	}
 	sort.Strings(ips)
 	return strings.Join(ips, ",")
+}
+
+type peerHello struct {
+	Hostname string `json:"hostname"`
+	IPs      string `json:"ips"`
+	Version  string `json:"version"`
+}
+
+func localHello() peerHello {
+	hostname, _ := os.Hostname()
+	return peerHello{
+		Hostname: hostname,
+		IPs:      localIPv4List(),
+		Version:  version,
+	}
+}
+
+func isSelfPeer(remoteHost, remoteIPs string) bool {
+	localHost, _ := os.Hostname()
+	if remoteHost != "" && remoteHost == localHost {
+		return true
+	}
+	localSet := map[string]struct{}{}
+	for _, ip := range strings.Split(localIPv4List(), ",") {
+		ip = strings.TrimSpace(ip)
+		if ip != "" {
+			localSet[ip] = struct{}{}
+		}
+	}
+	for _, ip := range strings.Split(remoteIPs, ",") {
+		ip = strings.TrimSpace(ip)
+		if ip == "" {
+			continue
+		}
+		if _, ok := localSet[ip]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) exchangeHelloAsClient(session *yamux.Session) (*peerHello, error) {
+	stream, err := session.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	_ = stream.SetDeadline(time.Now().Add(10 * time.Second))
+	if err := writeJSONFrame(stream, localHello()); err != nil {
+		return nil, err
+	}
+	var remote peerHello
+	if err := readJSONFrame(stream, &remote); err != nil {
+		return nil, err
+	}
+	return &remote, nil
+}
+
+func (a *App) exchangeHelloAsServer(session *yamux.Session) (*peerHello, error) {
+	stream, err := session.Accept()
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	_ = stream.SetDeadline(time.Now().Add(10 * time.Second))
+	var remote peerHello
+	if err := readJSONFrame(stream, &remote); err != nil {
+		return nil, err
+	}
+	if err := writeJSONFrame(stream, localHello()); err != nil {
+		return nil, err
+	}
+	return &remote, nil
 }
 
 func writeJSONFrame(w net.Conn, v any) error {
