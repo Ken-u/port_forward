@@ -257,7 +257,7 @@ func (a *App) handleIncomingStream(stream net.Conn) {
 		return
 	}
 
-	target, err := net.DialTimeout("tcp", req.Target, 5*time.Second)
+	target, err := net.DialTimeout("tcp", req.Target, 15*time.Second)
 	if err != nil {
 		stream.Write([]byte(`{"error":"` + err.Error() + `"}`))
 		return

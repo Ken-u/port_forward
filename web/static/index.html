@@ -32,9 +32,39 @@ th { color: #71767b; font-weight: 500; }
 .form-row input, .form-row select { flex: 1; min-width: 100px; padding: 8px 12px; border-radius: 8px; border: 1px solid #2f3336; background: #0f1419; color: #e7e9ea; font-size: 0.85rem; }
 .form-row input:focus, .form-row select:focus { outline: none; border-color: #1d9bf0; }
 .form-row input.invalid { border-color: #f4212e; }
-.target-group { display: flex; flex: 2; min-width: 180px; gap: 8px; }
-.target-group input { flex: 1; min-width: 0; }
-.target-group select { flex: 0 0 140px; max-width: 160px; }
+.target-group { position: relative; display: flex; flex: 2; min-width: 180px; }
+.target-group input { flex: 1; min-width: 0; width: 100%; padding-right: 34px; }
+.target-group select {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  min-width: 28px;
+  max-width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: transparent;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+}
+.target-group select:hover { background: #2f3336; }
+.target-group::after {
+  content: "▾";
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #aeb4b9;
+  font-size: 0.75rem;
+  pointer-events: none;
+  line-height: 1;
+}
 .token-field { display: flex; flex: 1; position: relative; }
 .token-field input { width: 100%; padding-right: 44px; }
 .token-toggle { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 36px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #aeb4b9; cursor: pointer; font-size: 1rem; }
@@ -61,8 +91,8 @@ th { color: #71767b; font-weight: 500; }
   th, td { padding: 9px 8px; font-size: 0.82rem; white-space: nowrap; }
   .form-row { flex-direction: column; gap: 8px; }
   .form-row input, .form-row select, .token-field, .target-group { width: 100%; max-width: none !important; min-height: 44px; }
-  .target-group { flex-direction: column; }
-  .target-group select { max-width: none; flex: none; }
+  .target-group select { width: 36px; min-width: 36px; max-width: 36px; height: 36px; }
+  .target-group::after { right: 14px; }
   .form-row > .btn { width: 100%; min-height: 44px; }
   .btn-sm { min-height: 36px; }
   .token-toggle { width: 40px; height: 36px; }
@@ -103,9 +133,9 @@ th { color: #71767b; font-weight: 500; }
       <input id="rule-listen" placeholder="监听地址">
       <input id="rule-listen-port" placeholder="监听端口 1024-65535" type="number" min="1" max="65535" style="max-width:150px" oninput="updatePortHint()">
       <div class="target-group">
-        <input id="rule-target" placeholder="目标地址（留空后从右侧选择）">
-        <select id="rule-target-history" onchange="applyTargetHistory()" title="常用目标 IP">
-          <option value="">常用目标 IP</option>
+        <input id="rule-target" placeholder="目标地址">
+        <select id="rule-target-history" onchange="applyTargetHistory()" title="选择历史目标 IP" aria-label="选择历史目标 IP">
+          <option value=""></option>
         </select>
       </div>
       <input id="rule-target-port" placeholder="目标端口" type="number" min="1" max="65535" style="max-width:110px">
@@ -185,7 +215,7 @@ function refreshTargetHistoryOptions() {
   const select = document.getElementById('rule-target-history');
   const current = select.value;
   const ips = collectTargetIPs();
-  select.innerHTML = '<option value="">常用目标 IP</option>' +
+  select.innerHTML = '<option value=""></option>' +
     ips.map(ip => `<option value="${esc(ip)}">${esc(ip)}</option>`).join('');
   if (current && ips.includes(current)) select.value = current;
 }
