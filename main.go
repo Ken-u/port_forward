@@ -59,7 +59,9 @@ type PeerSession struct {
 	RemoteHostname string
 	RemoteIPs      string
 	Self           bool
+	IsClient       bool
 	Session        *yamux.Session
+	Control        net.Conn
 	mu             sync.Mutex
 }
 
@@ -69,8 +71,9 @@ type App struct {
 	config     Config
 	mu         sync.RWMutex
 	peers      map[string]*PeerSession
-	listeners  map[string]net.Listener // rule ID -> listener
-	listenErrs map[string]string       // rule ID -> last listener startup error
+	peerRules  map[string][]ForwardRule // peer name -> remote rules snapshot
+	listeners  map[string]net.Listener  // rule ID -> listener
+	listenErrs map[string]string        // rule ID -> last listener startup error
 	listenerMu sync.Mutex
 }
 
@@ -100,6 +103,7 @@ func main() {
 		port:       *port,
 		configPath: cfgPath,
 		peers:      make(map[string]*PeerSession),
+		peerRules:  make(map[string][]ForwardRule),
 		listeners:  make(map[string]net.Listener),
 		listenErrs: make(map[string]string),
 	}
@@ -237,6 +241,7 @@ func (a *App) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		RemoteHostname: remote.Hostname,
 		RemoteIPs:      remote.IPs,
 		Self:           isSelfPeer(remote.Hostname, remote.IPs),
+		IsClient:       false,
 		Session:        session,
 	}
 	if ps.Self {
@@ -245,18 +250,29 @@ func (a *App) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		log.Printf("节点连入: %s (%s) ips=%s", peerName, r.RemoteAddr, remote.IPs)
 	}
 
+	if err := a.attachControl(ps); err != nil {
+		log.Printf("控制通道建立失败(%s): %v", peerName, err)
+		session.Close()
+		return
+	}
+
 	a.mu.Lock()
 	a.peers[peerName] = ps
 	a.mu.Unlock()
 
+	a.pushRulesToPeer(ps)
 	go a.servePeerStreams(ps)
 }
 
 func (a *App) servePeerStreams(ps *PeerSession) {
 	defer func() {
 		ps.Session.Close()
+		if ps.Control != nil {
+			ps.Control.Close()
+		}
 		a.mu.Lock()
 		delete(a.peers, ps.Name)
+		delete(a.peerRules, ps.Name)
 		a.mu.Unlock()
 		log.Printf("节点断开: %s", ps.Name)
 	}()
@@ -373,6 +389,7 @@ func (a *App) dialPeer(p PeerConfig) {
 		RemoteHostname: remote.Hostname,
 		RemoteIPs:      remote.IPs,
 		Self:           isSelfPeer(remote.Hostname, remote.IPs),
+		IsClient:       true,
 		Session:        session,
 	}
 	if ps.Self {
@@ -381,10 +398,17 @@ func (a *App) dialPeer(p PeerConfig) {
 		log.Printf("已连接节点: %s (%s) remote=%s ips=%s", p.Name, p.Addr, remote.Hostname, remote.IPs)
 	}
 
+	if err := a.attachControl(ps); err != nil {
+		log.Printf("控制通道建立失败(%s): %v", p.Name, err)
+		session.Close()
+		return
+	}
+
 	a.mu.Lock()
 	a.peers[p.Name] = ps
 	a.mu.Unlock()
 
+	a.pushRulesToPeer(ps)
 	go a.servePeerStreams(ps)
 }
 
@@ -671,6 +695,7 @@ func (a *App) handleRules(w http.ResponseWriter, r *http.Request) {
 		if ruleShouldListen(rule) {
 			go a.startLocalListener(rule)
 		}
+		a.broadcastRules()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(rule)
 	default:
@@ -697,6 +722,7 @@ func (a *App) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 		}
 		a.mu.Unlock()
 		a.saveConfig()
+		a.broadcastRules()
 		w.Write([]byte(`{"ok":true}`))
 	case http.MethodPut:
 		var updated ForwardRule
@@ -732,6 +758,7 @@ func (a *App) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 		if ruleShouldListen(updated) {
 			go a.startLocalListener(updated)
 		}
+		a.broadcastRules()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(updated)
 	default:
@@ -776,6 +803,7 @@ func (a *App) handlePeerByID(w http.ResponseWriter, r *http.Request) {
 		if ps, ok := a.peers[name]; ok {
 			ps.Session.Close()
 			delete(a.peers, name)
+			delete(a.peerRules, name)
 		}
 		for i, p := range a.config.Peers {
 			if p.Name == name {
@@ -848,15 +876,34 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	a.listenerMu.Unlock()
+
+	type PeerRulesView struct {
+		Peer     string        `json:"peer"`
+		Hostname string        `json:"hostname"`
+		Rules    []ForwardRule `json:"rules"`
+	}
+	var remoteRules []PeerRulesView
+	for name, rules := range a.peerRules {
+		item := PeerRulesView{
+			Peer:     name,
+			Hostname: name,
+			Rules:    append([]ForwardRule(nil), rules...),
+		}
+		if sess, ok := a.peers[name]; ok && sess.RemoteHostname != "" {
+			item.Hostname = sess.RemoteHostname
+		}
+		remoteRules = append(remoteRules, item)
+	}
 	a.mu.RUnlock()
 
 	hostname, _ := os.Hostname()
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"peers":    ps,
-		"rules":    rs,
-		"hostname": hostname,
-		"version":  version,
-		"ips":      localIPv4List(),
+		"peers":      ps,
+		"rules":      rs,
+		"peer_rules": remoteRules,
+		"hostname":   hostname,
+		"version":    version,
+		"ips":        localIPv4List(),
 	})
 }
 
@@ -997,6 +1044,82 @@ func isSelfPeer(remoteHost, remoteIPs string) bool {
 		}
 	}
 	return false
+}
+
+func (a *App) attachControl(ps *PeerSession) error {
+	var (
+		ctrl net.Conn
+		err  error
+	)
+	if ps.IsClient {
+		ctrl, err = ps.Session.Open()
+	} else {
+		ctrl, err = ps.Session.Accept()
+	}
+	if err != nil {
+		return err
+	}
+	ps.Control = ctrl
+	go a.controlLoop(ps)
+	return nil
+}
+
+type controlMsg struct {
+	Type  string        `json:"type"`
+	Rules []ForwardRule `json:"rules,omitempty"`
+}
+
+func (a *App) controlLoop(ps *PeerSession) {
+	defer ps.Control.Close()
+	for {
+		var msg controlMsg
+		if err := readJSONFrame(ps.Control, &msg); err != nil {
+			return
+		}
+		switch msg.Type {
+		case "rules_sync":
+			rules := append([]ForwardRule(nil), msg.Rules...)
+			a.mu.Lock()
+			a.peerRules[ps.Name] = rules
+			a.mu.Unlock()
+			log.Printf("已同步节点 %s 的转发规则 %d 条", ps.Name, len(rules))
+		}
+	}
+}
+
+func (a *App) snapshotRules() []ForwardRule {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make([]ForwardRule, len(a.config.Rules))
+	copy(out, a.config.Rules)
+	return out
+}
+
+func (a *App) pushRulesToPeer(ps *PeerSession) {
+	if ps == nil || ps.Control == nil || ps.Self {
+		return
+	}
+	msg := controlMsg{Type: "rules_sync", Rules: a.snapshotRules()}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.Control == nil {
+		return
+	}
+	if err := writeJSONFrame(ps.Control, msg); err != nil {
+		log.Printf("向节点 %s 同步规则失败: %v", ps.Name, err)
+	}
+}
+
+func (a *App) broadcastRules() {
+	a.mu.RLock()
+	peers := make([]*PeerSession, 0, len(a.peers))
+	for _, ps := range a.peers {
+		peers = append(peers, ps)
+	}
+	a.mu.RUnlock()
+	for _, ps := range peers {
+		a.pushRulesToPeer(ps)
+	}
 }
 
 func (a *App) exchangeHelloAsClient(session *yamux.Session) (*peerHello, error) {

@@ -122,7 +122,7 @@ th { color: #71767b; font-weight: 500; }
   </div>
 
   <div class="card">
-    <h2>转发规则</h2>
+    <h2>本机转发规则</h2>
     <div class="table-scroll">
       <table>
         <thead><tr><th>名称</th><th>本地监听</th><th>目标地址</th><th>拨号</th><th>状态</th><th>操作</th></tr></thead>
@@ -149,7 +149,18 @@ th { color: #71767b; font-weight: 500; }
       <button id="rule-cancel" class="btn btn-secondary" onclick="cancelRuleEdit()" style="display:none">取消修改</button>
     </div>
     <p id="rule-port-hint" class="hint">本地监听端口建议使用 1024–65535。1–1023 为系统特权端口，普通用户启动会报权限不足。</p>
-    <p class="hint">「测试目标」用<strong>当前打开的这台 port_fwd 进程</strong>去拨号，可确认是不是它连不上目标。方案 A 下应在<strong>家里</strong>管理页测 `192.168.1.203:30227`。</p>
+    <p class="hint">「测试目标」用<strong>当前打开的这台 port_fwd 进程</strong>去拨号。方案 A 下应在<strong>家里</strong>管理页测目标 SSH 端口。</p>
+  </div>
+
+  <div class="card">
+    <h2>对端转发规则</h2>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>来源节点</th><th>名称</th><th>对端监听</th><th>目标地址</th><th>拨号</th></tr></thead>
+        <tbody id="peer-rules-table"><tr><td colspan="5" class="empty">暂无对端规则（需两边都升级并保持节点已连接）</td></tr></tbody>
+      </table>
+    </div>
+    <p class="hint">只读同步显示：另一台机器上的转发规则会自动出现在这里，方便两边对照，不代表本机已监听这些端口。</p>
   </div>
 
   <div class="card">
@@ -339,6 +350,27 @@ async function refresh() {
     currentRules = [];
     rulesT.innerHTML = '<tr><td colspan="6" class="empty">暂无规则</td></tr>';
   }
+
+  const peerRulesT = document.getElementById('peer-rules-table');
+  const peerRuleGroups = status.peer_rules || [];
+  const peerRuleRows = [];
+  for (const group of peerRuleGroups) {
+    const source = group.hostname || group.peer || '对端';
+    if (!group.rules || !group.rules.length) continue;
+    for (const r of group.rules) {
+      peerRuleRows.push(`<tr>
+        <td>${esc(source)}</td>
+        <td>${esc(r.name || '')}</td>
+        <td><code>${esc(r.listen_addr)}:${r.listen_port}</code></td>
+        <td><code>${esc(r.target_addr)}:${r.target_port}</code></td>
+        <td>${(r.dial_side === 'local') ? '<span class="badge badge-blue">本机</span>' : '<span class="badge badge-blue">对端</span>'}</td>
+      </tr>`);
+    }
+  }
+  peerRulesT.innerHTML = peerRuleRows.length
+    ? peerRuleRows.join('')
+    : '<tr><td colspan="5" class="empty">暂无对端规则（需两边都升级并保持节点已连接）</td></tr>';
+
   refreshTargetHistoryOptions();
 
   const listenInput = document.getElementById('rule-listen');
