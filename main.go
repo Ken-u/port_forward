@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -111,6 +112,8 @@ func main() {
 	mux.HandleFunc("/api/peers", app.handlePeers)
 	mux.HandleFunc("/api/peers/", app.handlePeerByID)
 	mux.HandleFunc("/api/status", app.handleStatus)
+	mux.HandleFunc("/api/diag", app.handleDiag)
+	mux.HandleFunc("/api/diag/dial", app.handleDiagDial)
 	mux.HandleFunc("/tunnel", app.handleTunnel)
 	mux.HandleFunc("/", app.handleWeb)
 
@@ -254,7 +257,8 @@ func (a *App) handleIncomingStream(stream net.Conn) {
 	}
 
 	hostname, _ := os.Hostname()
-	log.Printf("收到转发请求: %s （本机 %s 负责拨号）", req.Target, hostname)
+	ips := localIPv4List()
+	log.Printf("收到转发请求: %s （本机 %s 负责拨号, ips=%s）", req.Target, hostname, ips)
 
 	target, err := net.DialTimeout("tcp4", req.Target, 15*time.Second)
 	if err != nil {
@@ -265,12 +269,13 @@ func (a *App) handleIncomingStream(stream net.Conn) {
 			"dialer":    hostname,
 			"target":    req.Target,
 			"dial_side": "peer",
+			"ips":       ips,
 		})
 		return
 	}
 	defer target.Close()
 
-	if err := writeJSONFrame(stream, map[string]any{"ok": true, "dialer": hostname}); err != nil {
+	if err := writeJSONFrame(stream, map[string]any{"ok": true, "dialer": hostname, "ips": ips}); err != nil {
 		return
 	}
 
@@ -415,21 +420,27 @@ func (a *App) forwardLocal(local net.Conn, target string) {
 	relay(local, remote)
 }
 
+func (a *App) pickPeerSession() (name string, session *yamux.Session) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	names := make([]string, 0, len(a.peers))
+	for n, ps := range a.peers {
+		if ps != nil && ps.Session != nil && !ps.Session.IsClosed() {
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		return "", nil
+	}
+	sort.Strings(names)
+	name = names[0]
+	return name, a.peers[name].Session
+}
+
 func (a *App) forwardToPeer(local net.Conn, target string) {
 	defer local.Close()
 
-	a.mu.RLock()
-	var session *yamux.Session
-	var peerName string
-	for _, ps := range a.peers {
-		if ps.Session != nil && !ps.Session.IsClosed() {
-			session = ps.Session
-			peerName = ps.Name
-			break
-		}
-	}
-	a.mu.RUnlock()
-
+	peerName, session := a.pickPeerSession()
 	if session == nil {
 		log.Printf("无可用节点，丢弃连接到 %s", target)
 		return
@@ -442,6 +453,7 @@ func (a *App) forwardToPeer(local net.Conn, target string) {
 	}
 	defer stream.Close()
 
+	log.Printf("经节点 %s 请求拨号 %s", peerName, target)
 	if err := writeJSONFrame(stream, map[string]string{"target": target}); err != nil {
 		log.Printf("发送转发请求失败: %v", err)
 		return
@@ -452,6 +464,7 @@ func (a *App) forwardToPeer(local net.Conn, target string) {
 		Error  string `json:"error"`
 		Dialer string `json:"dialer"`
 		Target string `json:"target"`
+		IPs    string `json:"ips"`
 	}
 	if err := readJSONFrame(stream, &resp); err != nil {
 		log.Printf("读取对端拨号结果失败: %v", err)
@@ -462,10 +475,7 @@ func (a *App) forwardToPeer(local net.Conn, target string) {
 		if who == "" {
 			who = peerName
 		}
-		if who == "" {
-			who = "对端"
-		}
-		log.Printf("对端(%s)连接 %s 失败: %s", who, target, resp.Error)
+		log.Printf("对端(%s)连接 %s 失败: %s (对端网卡: %s)", who, target, resp.Error, resp.IPs)
 		return
 	}
 
@@ -768,10 +778,65 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	a.listenerMu.Unlock()
 	a.mu.RUnlock()
 
+	hostname, _ := os.Hostname()
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"peers": ps,
-		"rules": rs,
+		"peers":    ps,
+		"rules":    rs,
+		"hostname": hostname,
+		"version":  version,
+		"ips":      localIPv4List(),
 	})
+}
+
+func (a *App) handleDiag(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	hostname, _ := os.Hostname()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"hostname": hostname,
+		"version":  version,
+		"ips":      localIPv4List(),
+	})
+}
+
+func (a *App) handleDiagDial(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	var req struct {
+		Addr string `json:"addr"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	req.Addr = strings.TrimSpace(req.Addr)
+	if req.Addr == "" {
+		http.Error(w, "addr 不能为空", 400)
+		return
+	}
+	hostname, _ := os.Hostname()
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp4", req.Addr, 5*time.Second)
+	result := map[string]any{
+		"addr":     req.Addr,
+		"hostname": hostname,
+		"ips":      localIPv4List(),
+		"ms":       time.Since(start).Milliseconds(),
+	}
+	if err != nil {
+		result["ok"] = false
+		result["error"] = err.Error()
+	} else {
+		conn.Close()
+		result["ok"] = true
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 // --- Web UI ---
@@ -801,6 +866,27 @@ func (a *App) handleWeb(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Utils ---
+
+func localIPv4List() string {
+	ifaces, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	var ips []string
+	for _, addr := range ifaces {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet.IP == nil {
+			continue
+		}
+		ip := ipNet.IP.To4()
+		if ip == nil || ip.IsLoopback() {
+			continue
+		}
+		ips = append(ips, ip.String())
+	}
+	sort.Strings(ips)
+	return strings.Join(ips, ",")
+}
 
 func writeJSONFrame(w net.Conn, v any) error {
 	payload, err := json.Marshal(v)
