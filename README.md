@@ -31,6 +31,48 @@
 
 也可在仓库 Actions 的 workflow artifacts 里下载未打包二进制。
 
+## 一键安装
+
+macOS / Linux：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ken-u/port_forward/main/install.sh | bash
+```
+
+脚本会：
+
+1. 识别当前平台并下载最新 Release 二进制
+2. 安装到 `~/.local/bin/port_fwd`
+3. **Linux** 下交互询问是否安装到当前用户的 systemd 服务（`systemctl --user`）
+
+常用环境变量：
+
+```bash
+# 指定版本
+PORT_FWD_VERSION=v0.1.5 bash install.sh
+
+# 非交互安装用户 systemd 服务
+PORT_FWD_SYSTEMD=yes PORT_FWD_HOST=0.0.0.0 PORT_FWD_PORT=9000 \
+  curl -fsSL https://raw.githubusercontent.com/Ken-u/port_forward/main/install.sh | bash
+
+# 自定义安装目录
+PORT_FWD_INSTALL_DIR=/usr/local/bin curl -fsSL ... | bash
+```
+
+Linux systemd 常用命令：
+
+```bash
+systemctl --user status port_fwd
+systemctl --user restart port_fwd
+journalctl --user -u port_fwd -f
+```
+
+如需注销后仍保持服务运行：
+
+```bash
+loginctl enable-linger "$USER"
+```
+
 ## 快速开始
 
 ```bash
