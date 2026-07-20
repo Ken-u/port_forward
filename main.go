@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"embed"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -34,7 +35,8 @@ type ForwardRule struct {
 	ListenPort int    `json:"listen_port"`
 	TargetAddr string `json:"target_addr"`
 	TargetPort int    `json:"target_port"`
-	Direction  string `json:"direction"` // "local" = listen locally, forward to peer's target; "remote" = peer listens, forward to our target
+	Direction  string `json:"direction"` // legacy; kept for compatibility
+	DialSide   string `json:"dial_side"` // "peer" (default) = peer dials target; "local" = this machine dials target
 	Enabled    bool   `json:"enabled"`
 }
 
@@ -244,27 +246,33 @@ func (a *App) servePeerStreams(ps *PeerSession) {
 func (a *App) handleIncomingStream(stream net.Conn) {
 	defer stream.Close()
 
-	buf := make([]byte, 1024)
-	n, err := stream.Read(buf)
-	if err != nil {
-		return
-	}
-
 	var req struct {
 		Target string `json:"target"`
 	}
-	if err := json.Unmarshal(buf[:n], &req); err != nil || req.Target == "" {
+	if err := readJSONFrame(stream, &req); err != nil || req.Target == "" {
 		return
 	}
 
-	target, err := net.DialTimeout("tcp", req.Target, 15*time.Second)
+	hostname, _ := os.Hostname()
+	log.Printf("收到转发请求: %s （本机 %s 负责拨号）", req.Target, hostname)
+
+	target, err := net.DialTimeout("tcp4", req.Target, 15*time.Second)
 	if err != nil {
-		stream.Write([]byte(`{"error":"` + err.Error() + `"}`))
+		log.Printf("本机(%s)拨号 %s 失败: %v", hostname, req.Target, err)
+		_ = writeJSONFrame(stream, map[string]any{
+			"ok":        false,
+			"error":     err.Error(),
+			"dialer":    hostname,
+			"target":    req.Target,
+			"dial_side": "peer",
+		})
 		return
 	}
 	defer target.Close()
 
-	stream.Write([]byte(`{"ok":true}`))
+	if err := writeJSONFrame(stream, map[string]any{"ok": true, "dialer": hostname}); err != nil {
+		return
+	}
 
 	relay(stream, target)
 }
@@ -342,7 +350,7 @@ func (a *App) startLocalRules() {
 	a.mu.RUnlock()
 
 	for _, r := range rules {
-		if r.Enabled && r.Direction == "local" {
+		if ruleShouldListen(r) {
 			go a.startLocalListener(r)
 		}
 	}
@@ -368,15 +376,43 @@ func (a *App) startLocalListener(rule ForwardRule) {
 	a.listenerMu.Unlock()
 
 	target := fmt.Sprintf("%s:%d", rule.TargetAddr, rule.TargetPort)
-	log.Printf("本地转发: %s → 对端 %s", addr, target)
+	dialSide := normalizeDialSide(rule.DialSide)
+	log.Printf("本地转发: %s → [%s] %s", addr, dialSide, target)
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		go a.forwardToPeer(conn, target)
+		go a.forwardConnection(conn, target, dialSide)
 	}
+}
+
+func normalizeDialSide(side string) string {
+	if strings.EqualFold(strings.TrimSpace(side), "local") {
+		return "local"
+	}
+	return "peer"
+}
+
+func (a *App) forwardConnection(local net.Conn, target, dialSide string) {
+	if dialSide == "local" {
+		a.forwardLocal(local, target)
+		return
+	}
+	a.forwardToPeer(local, target)
+}
+
+func (a *App) forwardLocal(local net.Conn, target string) {
+	defer local.Close()
+	hostname, _ := os.Hostname()
+	remote, err := net.DialTimeout("tcp4", target, 15*time.Second)
+	if err != nil {
+		log.Printf("本机(%s)本地拨号 %s 失败: %v", hostname, target, err)
+		return
+	}
+	defer remote.Close()
+	relay(local, remote)
 }
 
 func (a *App) forwardToPeer(local net.Conn, target string) {
@@ -384,9 +420,11 @@ func (a *App) forwardToPeer(local net.Conn, target string) {
 
 	a.mu.RLock()
 	var session *yamux.Session
+	var peerName string
 	for _, ps := range a.peers {
 		if ps.Session != nil && !ps.Session.IsClosed() {
 			session = ps.Session
+			peerName = ps.Name
 			break
 		}
 	}
@@ -404,21 +442,30 @@ func (a *App) forwardToPeer(local net.Conn, target string) {
 	}
 	defer stream.Close()
 
-	req, _ := json.Marshal(map[string]string{"target": target})
-	stream.Write(req)
-
-	buf := make([]byte, 1024)
-	n, err := stream.Read(buf)
-	if err != nil {
+	if err := writeJSONFrame(stream, map[string]string{"target": target}); err != nil {
+		log.Printf("发送转发请求失败: %v", err)
 		return
 	}
+
 	var resp struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error"`
+		OK     bool   `json:"ok"`
+		Error  string `json:"error"`
+		Dialer string `json:"dialer"`
+		Target string `json:"target"`
 	}
-	json.Unmarshal(buf[:n], &resp)
+	if err := readJSONFrame(stream, &resp); err != nil {
+		log.Printf("读取对端拨号结果失败: %v", err)
+		return
+	}
 	if !resp.OK {
-		log.Printf("对端连接 %s 失败: %s", target, resp.Error)
+		who := resp.Dialer
+		if who == "" {
+			who = peerName
+		}
+		if who == "" {
+			who = "对端"
+		}
+		log.Printf("对端(%s)连接 %s 失败: %s", who, target, resp.Error)
 		return
 	}
 
@@ -510,7 +557,22 @@ func validateRule(rule ForwardRule) error {
 	if strings.TrimSpace(rule.ListenAddr) == "" {
 		return fmt.Errorf("监听地址不能为空")
 	}
+	side := strings.ToLower(strings.TrimSpace(rule.DialSide))
+	if side != "" && side != "peer" && side != "local" {
+		return fmt.Errorf("dial_side 只能是 peer 或 local")
+	}
 	return nil
+}
+
+func normalizeRule(rule *ForwardRule) {
+	if rule.Direction == "" {
+		rule.Direction = "local"
+	}
+	rule.DialSide = normalizeDialSide(rule.DialSide)
+}
+
+func ruleShouldListen(rule ForwardRule) bool {
+	return rule.Enabled && (rule.Direction == "local" || rule.Direction == "")
 }
 
 func (a *App) handleRules(w http.ResponseWriter, r *http.Request) {
@@ -529,6 +591,7 @@ func (a *App) handleRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		normalizeRule(&rule)
 		if rule.ID == "" {
 			rule.ID = fmt.Sprintf("%d", time.Now().UnixNano())
 		}
@@ -536,7 +599,7 @@ func (a *App) handleRules(w http.ResponseWriter, r *http.Request) {
 		a.config.Rules = append(a.config.Rules, rule)
 		a.mu.Unlock()
 		a.saveConfig()
-		if rule.Enabled && rule.Direction == "local" {
+		if ruleShouldListen(rule) {
 			go a.startLocalListener(rule)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -576,6 +639,7 @@ func (a *App) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		normalizeRule(&updated)
 		found := false
 		a.mu.Lock()
 		for i, rule := range a.config.Rules {
@@ -596,7 +660,7 @@ func (a *App) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if updated.Enabled && updated.Direction == "local" {
+		if ruleShouldListen(updated) {
 			go a.startLocalListener(updated)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -737,6 +801,39 @@ func (a *App) handleWeb(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Utils ---
+
+func writeJSONFrame(w net.Conn, v any) error {
+	payload, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	if len(payload) > 1<<20 {
+		return fmt.Errorf("frame too large")
+	}
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(payload)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	_, err = w.Write(payload)
+	return err
+}
+
+func readJSONFrame(r net.Conn, v any) error {
+	var hdr [4]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return err
+	}
+	n := binary.BigEndian.Uint32(hdr[:])
+	if n == 0 || n > 1<<20 {
+		return fmt.Errorf("invalid frame size %d", n)
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return err
+	}
+	return json.Unmarshal(buf, v)
+}
 
 func relay(a, b net.Conn) {
 	var wg sync.WaitGroup

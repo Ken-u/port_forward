@@ -124,8 +124,8 @@ th { color: #71767b; font-weight: 500; }
     <h2>转发规则</h2>
     <div class="table-scroll">
       <table>
-        <thead><tr><th>名称</th><th>本地监听</th><th>目标地址</th><th>状态</th><th>操作</th></tr></thead>
-        <tbody id="rules-table"><tr><td colspan="5" class="empty">暂无规则</td></tr></tbody>
+        <thead><tr><th>名称</th><th>本地监听</th><th>目标地址</th><th>拨号</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="rules-table"><tr><td colspan="6" class="empty">暂无规则</td></tr></tbody>
       </table>
     </div>
     <div id="rule-form" class="form-row" style="margin-top:12px">
@@ -139,10 +139,15 @@ th { color: #71767b; font-weight: 500; }
         </select>
       </div>
       <input id="rule-target-port" placeholder="目标端口" type="number" min="1" max="65535" style="max-width:110px">
+      <select id="rule-dial-side" title="谁去连接目标" style="max-width:160px">
+        <option value="peer">目标在对端网络</option>
+        <option value="local">目标在本机网络</option>
+      </select>
       <button id="rule-submit" class="btn btn-primary" onclick="submitRule()">添加规则</button>
       <button id="rule-cancel" class="btn btn-secondary" onclick="cancelRuleEdit()" style="display:none">取消修改</button>
     </div>
     <p id="rule-port-hint" class="hint">本地监听端口建议使用 1024–65535。1–1023 为系统特权端口，普通用户启动会报权限不足。</p>
+    <p class="hint">「目标在对端网络」：本机只监听，由对端机器去连目标（跨 frp 访对端内网用这个）。「目标在本机网络」：本机监听并本机直连目标（适合监听口已通过 frp 暴露、目标就在本机/局域网）。</p>
   </div>
 
   <div class="card">
@@ -308,6 +313,7 @@ async function refresh() {
       <td>${esc(r.name)}</td>
       <td>${renderListenCell(r)}</td>
       <td><code>${esc(r.target_addr)}:${r.target_port}</code></td>
+      <td>${(r.dial_side === 'local') ? '<span class="badge badge-blue">本机</span>' : '<span class="badge badge-blue">对端</span>'}</td>
       <td>${r.error
         ? `<span class="badge badge-red">启动失败</span><div class="rule-error">${esc(r.error)}</div>`
         : r.listening
@@ -320,7 +326,7 @@ async function refresh() {
     </tr>`).join('');
   } else {
     currentRules = [];
-    rulesT.innerHTML = '<tr><td colspan="5" class="empty">暂无规则</td></tr>';
+    rulesT.innerHTML = '<tr><td colspan="6" class="empty">暂无规则</td></tr>';
   }
   refreshTargetHistoryOptions();
 
@@ -367,6 +373,7 @@ async function submitRule() {
   const listen_port = parseInt(document.getElementById('rule-listen-port').value, 10);
   const target_addr = document.getElementById('rule-target').value.trim();
   const target_port = parseInt(document.getElementById('rule-target-port').value, 10);
+  const dial_side = document.getElementById('rule-dial-side').value || 'peer';
   const portError = validateListenPort(listen_port);
   if (portError) {
     updatePortHint();
@@ -379,6 +386,7 @@ async function submitRule() {
     name: name || `${listen_port}->${target_port}`,
     listen_addr,
     listen_port, target_addr, target_port,
+    dial_side,
     direction: 'local', enabled: true
   };
   const url = editingRuleID ? `/api/rules/${editingRuleID}` : '/api/rules';
@@ -403,6 +411,7 @@ function editRule(id) {
   document.getElementById('rule-target').value = rule.target_addr || '';
   document.getElementById('rule-target-port').value = rule.target_port || '';
   document.getElementById('rule-target-history').value = '';
+  document.getElementById('rule-dial-side').value = rule.dial_side === 'local' ? 'local' : 'peer';
   document.getElementById('rule-submit').textContent = '保存修改';
   document.getElementById('rule-cancel').style.display = '';
   updatePortHint();
@@ -417,6 +426,7 @@ function cancelRuleEdit() {
   document.getElementById('rule-target').value = '';
   document.getElementById('rule-target-port').value = '';
   document.getElementById('rule-target-history').value = '';
+  document.getElementById('rule-dial-side').value = 'peer';
   document.getElementById('rule-submit').textContent = '添加规则';
   document.getElementById('rule-cancel').style.display = 'none';
   updatePortHint();
